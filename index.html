@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Daily Prayer Checklist</title>
+  <style>
+    :root { color-scheme: pink-dark; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, "Apple Color Emoji", "Segoe UI Emoji"; margin: 0; padding: 24px; line-height: 1.5; background: #deb9d1}
+    .container { max-width: 1000px; margin: 0 auto; }
+    header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+    h1 { font-size: 20px; margin: 0; }
+    .sub { opacity: 0.8; font-size: 13px; }
+
+    .controls { display: flex; flex-wrap: wrap; gap: 8px; }
+    button, input[type="text"] { font: inherit; padding: 8px 10px; border-radius: 8px; border: 1px solid #8884; background: transparent; }
+    button.primary { background: #e153ad; color: #fff; border-color: #e153ad; }
+    button.danger { background: #e27979; color: #fff; border-color: #e27979; }
+    button:hover { filter: brightness(1.05); }
+
+    .table-wrap { overflow: auto; border: 1px solid #8884; border-radius: 10px; }
+    table { width: 100%; border-collapse: collapse; min-width: 640px; background: #f9ebf6; }
+    thead th { position: sticky; top: 0; background: #fff; z-index: 1; }
+    th, td { border-bottom: 1px solid #8883; padding: 10px; text-align: center; }
+    th.sticky-col, td.sticky-col { position: sticky; left: 0; background: #fff ; text-align: left; z-index: 2; }
+
+    .habit-header { display: flex; align-items: center; justify-content: center; gap: 8px; }
+    .habit-title { font-weight: 600; cursor: text; padding: 2px 6px; border-radius: 6px; }
+    .habit-title[contenteditable="true"]:focus { outline: 2px solid #2563eb66; }
+    .icon-btn { border: none; padding: 6px; width: 28px; height: 28px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; background: #0000000d; }
+    .icon-btn:hover { background: #0000001a; }
+
+    .week-info { font-size: 13px; opacity: 0.9; }
+    .footer { margin-top: 10px; display: flex; align-items: center; gap: 10px; justify-content: space-between; flex-wrap: wrap; }
+
+    .checkbox { width: 18px; height: 18px; accent-color: #eb45b4; }
+    .muted { opacity: 0.7; }
+    .hint { font-size: 12px; opacity: 0.8; }
+    .small { padding: 4px 8px; font-size: 12px; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>Daily Prayer Checklist</h1>
+        <div class="sub">Track your prays across the week. Progress resets automatically every new week.</div>
+      </div>
+      <div class="controls">
+        <input id="newHabitInput" type="text" placeholder="Add a Sinah" />
+        <button id="addHabitBtn" class="primary">Add sinah</button>
+        <button id="resetWeekBtn" class="danger">Reset Current Week</button>
+        <button id="setAutoSaveBtn" class="small">Set Auto‑Save File</button>
+        <span id="autoSaveStatus" class="muted"></span>
+      </div>
+    </header>
+
+    <div class="footer">
+      <div class="week-info" id="weekInfo"></div>
+      <div class="hint">Tip: Double‑click a habit name to rename. Use the × to delete.</div>
+    </div>
+
+    <div class="table-wrap" id="tableWrap">
+      <table id="checklistTable" aria-label="Weekly Habits Checklist"></table>
+    </div>
+
+    
+  </div>
+
+  <script>
+    (function () {
+      const STORAGE_KEYS = {
+        habits: "habits:list",
+        checksPrefix: "habits:checks:",
+        lastWeekKey: "habits:lastWeekKey",
+      };
+
+      const defaultHabits = ["AlFajer", "AlDaher", "AlAser", "AlMagrb", "AlAshah"];
+      const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+      const newHabitInput = document.getElementById("newHabitInput");
+      const addHabitBtn = document.getElementById("addHabitBtn");
+      const resetWeekBtn = document.getElementById("resetWeekBtn");
+      const table = document.getElementById("checklistTable");
+      const weekInfoEl = document.getElementById("weekInfo");
+      const setAutoSaveBtn = document.getElementById("setAutoSaveBtn");
+      const autoSaveStatus = document.getElementById("autoSaveStatus");
+
+      // --- IndexedDB helpers for storing file handles (required by the File System Access API) ---
+      const DB_NAME = 'habits-db';
+      const DB_VERSION = 1;
+      function openDb() {
+        return new Promise((resolve, reject) => {
+          const req = indexedDB.open(DB_NAME, DB_VERSION);
+          req.onupgradeneeded = () => {
+            const db = req.result;
+            if (!db.objectStoreNames.contains('fs')) db.createObjectStore('fs');
+          };
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        });
+      }
+      async function saveFileHandle(handle) {
+        const db = await openDb();
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction('fs', 'readwrite');
+          tx.objectStore('fs').put(handle, 'autosaveFile');
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+        });
+      }
+      async function loadFileHandle() {
+        const db = await openDb();
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction('fs', 'readonly');
+          const req = tx.objectStore('fs').get('autosaveFile');
+          req.onsuccess = () => resolve(req.result || null);
+          req.onerror = () => reject(req.error);
+        });
+      }
+
+      function getWeekKey(date = new Date()) {
+        const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+        const day = d.getUTCDay(); // 0-6, Sunday is 0
+        const sunday = new Date(d);
+        sunday.setUTCDate(d.getUTCDate() - day);
+        const yyyy = sunday.getUTCFullYear();
+        const firstJan = new Date(Date.UTC(yyyy, 0, 1));
+        const daysDiff = Math.floor((sunday - firstJan) / 86400000);
+        const week = Math.floor(daysDiff / 7) + 1; // week index starting at 1
+        return `${yyyy}-W${String(week).padStart(2, "0")}`;
+      }
+
+      function getCurrentChecksKey() {
+        return STORAGE_KEYS.checksPrefix + getWeekKey();
+      }
+
+      function loadHabits() {
+        try {
+          const raw = localStorage.getItem(STORAGE_KEYS.habits);
+          const parsed = raw ? JSON.parse(raw) : null;
+          if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        } catch {}
+        return defaultHabits.slice();
+      }
+
+      function saveHabits(habits) {
+        localStorage.setItem(STORAGE_KEYS.habits, JSON.stringify(habits));
+      }
+
+      function loadChecks() {
+        try {
+          const raw = localStorage.getItem(getCurrentChecksKey());
+          const parsed = raw ? JSON.parse(raw) : null;
+          if (parsed && typeof parsed === "object") return parsed;
+        } catch {}
+        return {};
+      }
+
+      function saveChecks(checks) {
+        localStorage.setItem(getCurrentChecksKey(), JSON.stringify(checks));
+      }
+
+      function maybeResetForNewWeek() {
+        const currentKey = getWeekKey();
+        const lastKey = localStorage.getItem(STORAGE_KEYS.lastWeekKey);
+        if (lastKey !== currentKey) {
+          localStorage.setItem(STORAGE_KEYS.lastWeekKey, currentKey);
+          // New week: clear checks for the new week storage key (do not touch other weeks)
+          localStorage.removeItem(getCurrentChecksKey());
+        }
+      }
+
+      function render() {
+        const habits = loadHabits();
+        const checks = loadChecks();
+
+        const currentWeek = getWeekKey();
+        const sunday = (function () {
+          const now = new Date();
+          const day = now.getDay();
+          const s = new Date(now);
+          s.setDate(now.getDate() - day);
+          return s;
+        })();
+        const saturday = new Date(sunday);
+        saturday.setDate(saturday.getDate() + 6);
+        weekInfoEl.textContent = `Week ${currentWeek} (${sunday.toLocaleDateString()} – ${saturday.toLocaleDateString()})`;
+
+        const headerCells = ["<th class=\"sticky-col\">Day</th>"];
+        habits.forEach((habit, index) => {
+          headerCells.push(
+            `<th>
+               <div class=\"habit-header\">
+                 <span class=\"habit-title\" data-idx=\"${index}\" title=\"Double‑click to rename\" tabindex=\"0\">${escapeHtml(habit)}</span>
+                 <button class=\"icon-btn\" data-action=\"delete-habit\" data-idx=\"${index}\" aria-label=\"Delete habit\">×</button>
+               </div>
+             </th>`
+          );
+        });
+
+        const thead = `<thead><tr>${headerCells.join("")}</tr></thead>`;
+
+        const bodyRows = dayNames.map((dayName, dayIndex) => {
+          const rowCells = [`<td class=\"sticky-col\">${dayName}</td>`];
+          habits.forEach((_habit, habitIndex) => {
+            const checked = !!(checks[dayIndex] && checks[dayIndex][habitIndex]);
+            rowCells.push(
+              `<td>
+                 <input class=\"checkbox\" type=\"checkbox\" data-day=\"${dayIndex}\" data-habit=\"${habitIndex}\" ${checked ? "checked" : ""} aria-label=\"${dayName} – ${escapeHtml(_habit)}\" />
+               </td>`
+            );
+          });
+          return `<tr>${rowCells.join("")}</tr>`;
+        });
+
+        const tbody = `<tbody>${bodyRows.join("")}</tbody>`;
+        table.innerHTML = thead + tbody;
+
+        table.querySelectorAll('input[type="checkbox"]').forEach((el) => {
+          el.addEventListener("change", () => {
+            const day = Number(el.getAttribute("data-day"));
+            const habit = Number(el.getAttribute("data-habit"));
+            const updated = loadChecks();
+            if (!updated[day]) updated[day] = {};
+            updated[day][habit] = el.checked;
+            saveChecks(updated);
+            queueAutoSave();
+          });
+        });
+
+        table.querySelectorAll('.habit-title').forEach((el) => {
+          el.addEventListener("dblclick", () => enableRename(el));
+          el.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") { e.preventDefault(); el.blur(); }
+          });
+          el.addEventListener("blur", () => commitRename(el));
+        });
+
+        table.querySelectorAll('[data-action="delete-habit"]').forEach((btn) => {
+          btn.addEventListener("click", () => {
+            const idx = Number(btn.getAttribute("data-idx"));
+            const habitsNow = loadHabits();
+            if (idx < 0 || idx >= habitsNow.length) return;
+            const confirmed = confirm(`Delete habit "${habitsNow[idx]}"?`);
+            if (!confirmed) return;
+            habitsNow.splice(idx, 1);
+            saveHabits(habitsNow);
+            const checksNow = loadChecks();
+            Object.keys(checksNow).forEach((dayKey) => {
+              const dayMap = checksNow[dayKey];
+              if (dayMap && typeof dayMap === "object") {
+                const newDayMap = {};
+                Object.keys(dayMap).forEach((hIdxStr) => {
+                  const hIdx = Number(hIdxStr);
+                  if (hIdx < idx) newDayMap[hIdx] = dayMap[hIdx];
+                  else if (hIdx > idx) newDayMap[hIdx - 1] = dayMap[hIdx];
+                });
+                checksNow[dayKey] = newDayMap;
+              }
+            });
+            saveChecks(checksNow);
+            render();
+            queueAutoSave();
+          });
+        });
+      }
+
+      function enableRename(el) {
+        el.setAttribute("contenteditable", "true");
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        el.focus();
+      }
+
+      function commitRename(el) {
+        const idx = Number(el.getAttribute("data-idx"));
+        const text = (el.textContent || "").trim();
+        const habits = loadHabits();
+        if (text.length === 0) {
+          el.textContent = habits[idx] ?? "Habit";
+          el.removeAttribute("contenteditable");
+          return;
+        }
+        habits[idx] = text;
+        saveHabits(habits);
+        el.removeAttribute("contenteditable");
+        queueAutoSave();
+      }
+
+      function addHabit() {
+        const value = (newHabitInput.value || "").trim();
+        if (!value) return;
+        const habits = loadHabits();
+        habits.push(value);
+        saveHabits(habits);
+        newHabitInput.value = "";
+        render();
+        queueAutoSave();
+      }
+
+      function resetCurrentWeek() {
+        localStorage.removeItem(getCurrentChecksKey());
+        render();
+        queueAutoSave();
+      }
+
+      function escapeHtml(str) {
+        return String(str)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      addHabitBtn.addEventListener("click", addHabit);
+      newHabitInput.addEventListener("keydown", (e) => { if (e.key === "Enter") addHabit(); });
+      resetWeekBtn.addEventListener("click", resetCurrentWeek);
+      setAutoSaveBtn.addEventListener("click", setupAutoSaveFile);
+
+      function collectAllData() {
+        const data = { habits: null, lastWeekKey: null, checks: {} };
+        try {
+          const habitsRaw = localStorage.getItem(STORAGE_KEYS.habits);
+          data.habits = habitsRaw ? JSON.parse(habitsRaw) : null;
+        } catch {}
+        data.lastWeekKey = localStorage.getItem(STORAGE_KEYS.lastWeekKey);
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (key && key.startsWith(STORAGE_KEYS.checksPrefix)) {
+            try {
+              const weekKey = key.substring(STORAGE_KEYS.checksPrefix.length);
+              data.checks[weekKey] = JSON.parse(localStorage.getItem(key) || '{}');
+            } catch {}
+          }
+        }
+        return data;
+      }
+
+      maybeResetForNewWeek();
+      if (!localStorage.getItem(STORAGE_KEYS.habits)) {
+        saveHabits(defaultHabits);
+      }
+      render();
+      updateAutoSaveStatus();
+
+      // --- Auto-save implementation ---
+      async function setupAutoSaveFile() {
+        if (!window.showSaveFilePicker) {
+          alert('Auto‑save requires a modern browser with file access support (Chrome/Edge).');
+          return;
+        }
+        try {
+          const handle = await window.showSaveFilePicker({
+            suggestedName: 'habits-auto.json',
+            types: [{ description: 'JSON', accept: { 'application/json': ['.json'] } }]
+          });
+          await saveFileHandle(handle);
+          await autoSaveNow(handle);
+          updateAutoSaveStatus(handle);
+        } catch {}
+      }
+
+      async function autoSaveNow(optionalHandle) {
+        try {
+          const handle = optionalHandle || await loadFileHandle();
+          if (!handle) return;
+          const data = collectAllData();
+          const json = JSON.stringify(data, null, 2);
+          const writable = await handle.createWritable();
+          await writable.write(new Blob([json], { type: 'application/json' }));
+          await writable.close();
+          updateAutoSaveStatus(handle);
+        } catch (e) {
+          // silently ignore (e.g., permission revoked)
+        }
+      }
+
+      let autoSaveTimer = null;
+      function queueAutoSave() {
+        if (autoSaveTimer) clearTimeout(autoSaveTimer);
+        autoSaveTimer = setTimeout(() => { autoSaveNow(); }, 500);
+      }
+
+      async function updateAutoSaveStatus(optionalHandle) {
+        const handle = optionalHandle || await loadFileHandle();
+        if (handle && handle.name) {
+          autoSaveStatus.textContent = `Auto‑saving to: ${handle.name}`;
+        } else {
+          autoSaveStatus.textContent = '';
+        }
+      }
+    })();
+  </script>
+</body>
+</html>
